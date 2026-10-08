@@ -1,0 +1,162 @@
+// ClearLedger Core-Banking Database Schema
+// Based on double-entry accounting invariants, ACID transactions, and Supabase PostgreSQL.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum UserRole {
+  CUSTOMER
+  TELLER
+  ADMIN
+}
+
+enum AccountType {
+  SAVINGS
+  CURRENT
+  SYSTEM_CLEARING
+  SYSTEM_VAULT
+  SYSTEM_FEES
+}
+
+enum AccountStatus {
+  ACTIVE
+  FROZEN
+  DORMANT
+  CLOSED
+}
+
+enum EntryType {
+  TRANSFER
+  DEPOSIT
+  WITHDRAWAL
+  FEE
+  INTEREST
+  REVERSAL
+}
+
+enum PostingDirection {
+  DEBIT
+  CREDIT
+}
+
+enum IdempotencyStatus {
+  PENDING
+  COMPLETED
+  FAILED
+}
+
+model User {
+  id           String   @id @default(cuid())
+  email        String   @unique
+  name         String
+  passwordHash String?
+  role         UserRole @default(CUSTOMER)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  accounts      Account[]
+  auditLogs     AuditLog[]
+  idempotencies IdempotencyKey[]
+
+  @@index([role])
+}
+
+model Account {
+  id            String        @id @default(cuid())
+  userId        String?
+  user          User?         @relation(fields: [userId], references: [id], onDelete: Restrict)
+  accountNumber String        @unique
+  iban          String        @unique
+  type          AccountType
+  status        AccountStatus @default(ACTIVE)
+  currency      String        @default("USD")
+  balance       BigInt        @default(0) // Materialized balance in minor units (cents)
+  version       Int           @default(1) // Optimistic locking counter
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  postings LedgerPosting[]
+
+  @@index([userId])
+  @@index([iban])
+  @@index([type, status])
+}
+
+model JournalEntry {
+  id             String          @id @default(cuid())
+  reference      String          @unique // e.g., TXN-20261008-XXXXXX
+  type           EntryType
+  description    String
+  idempotencyId  String?         @unique
+  idempotencyKey IdempotencyKey? @relation(fields: [idempotencyId], references: [id])
+  postedAt       DateTime        @default(now())
+
+  postings LedgerPosting[]
+
+  @@index([reference])
+  @@index([postedAt])
+  @@index([type])
+}
+
+model LedgerPosting {
+  id             String           @id @default(cuid())
+  journalEntryId String
+  journalEntry   JournalEntry     @relation(fields: [journalEntryId], references: [id], onDelete: Restrict)
+  accountId      String
+  account        Account          @relation(fields: [accountId], references: [id], onDelete: Restrict)
+  direction      PostingDirection
+  amount         BigInt // Always positive, minor units
+  currency       String           @default("USD")
+  balanceAfter   BigInt // Running balance snapshot
+  sequence       Int // Order within journal entry (0, 1, ...)
+  createdAt      DateTime         @default(now())
+
+  @@index([journalEntryId])
+  @@index([accountId, createdAt])
+}
+
+model IdempotencyKey {
+  id           String            @id @default(cuid())
+  userId       String
+  user         User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  key          String
+  endpoint     String
+  requestHash  String // SHA-256 hash of request body
+  status       IdempotencyStatus @default(PENDING)
+  responseCode Int?
+  responseBody String? // Stored JSON response
+  lockedAt     DateTime          @default(now())
+  expiresAt    DateTime
+  createdAt    DateTime          @default(now())
+
+  journalEntry JournalEntry?
+
+  @@unique([userId, endpoint, key])
+  @@index([userId, endpoint, key])
+  @@index([expiresAt])
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  userId     String?
+  user       User?    @relation(fields: [userId], references: [id], onDelete: SetNull)
+  role       String?
+  action     String // e.g. "TRANSFER_INITIATED", "ACCOUNT_FROZEN", "INVARIANT_VERIFICATION_RUN"
+  resource   String // e.g. "Account", "JournalEntry"
+  resourceId String?
+  metadata   String? // JSON stringified details
+  ipAddress  String?
+  userAgent  String?
+  timestamp  DateTime @default(now())
+
+  @@index([userId])
+  @@index([action])
+  @@index([timestamp])
+}

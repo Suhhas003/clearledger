@@ -1,0 +1,61 @@
+name: ClearLedger CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+
+jobs:
+  ci:
+    name: Build, Typecheck, and Test
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgrespassword
+          POSTGRES_DB: clearledger_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: "postgresql://postgres:postgrespassword@localhost:5432/clearledger_test?schema=public"
+      DIRECT_URL: "postgresql://postgres:postgrespassword@localhost:5432/clearledger_test?schema=public"
+      NEXTAUTH_SECRET: "ci-test-secret-32-characters-minimum-length-key"
+      NEXTAUTH_URL: "http://localhost:3000"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Generate Prisma Client
+        run: npx prisma generate
+
+      - name: Push Prisma Schema to CI Database
+        run: npx prisma db push --skip-generate
+
+      - name: Type check (TypeScript)
+        run: npx tsc --noEmit
+
+      - name: Run Test Suite (Vitest)
+        run: npx vitest run
+
+      - name: Production Build (Next.js)
+        run: npm run build
